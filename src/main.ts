@@ -152,19 +152,11 @@ async function main()
 
 			updatedZones += 1;
 		}
-		else
-		{
-			console.log(`${zone.name}: All DNS records are up to date.`);
-		}
 	}
 
 	if (updatedZones > 0)
 	{
 		console.log(`Updated ${updatedZones} zones.`);
-	}
-	else
-	{
-		console.log("All zones are up to date.");
 	}
 }
 
@@ -174,6 +166,6 @@ main().catch((error: any) =>
 		? error.message
 		: String(error);
 
-	console.error(message);
+	console.error("Failed to update DNS records: " + message);
 	process.exit(1);
 });
