@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "@types/node": "^18.14.0"
+  },
+  "scripts": {
+    "start": "ncc run src/main.ts",
+    "build": "ncc build src/main.ts -m"
+  }
+}
