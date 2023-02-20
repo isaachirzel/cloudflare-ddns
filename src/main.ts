@@ -1,110 +1,74 @@
-import * as fs from "fs";
+
 import * as os from "os";
-import { Cloudflare } from "./cloudflare";
+import { Cloudflare, Zone } from "./cloudflare";
+import { Config, ZoneConfig } from "./config";
+import { Ipify } from "./ipify";
 
-interface ZoneConfig
+interface Client
 {
-	name: string;
-	dnsEntries: string[];
+	cloudflare: Cloudflare;
+	ipify: Ipify;
 }
 
-interface Config
+function log(message: string): void
 {
-	apiToken: string;
-	zones: ZoneConfig[];
+	console.log("DDNS Util: " + message);
 }
 
-async function getPublicIp(): Promise<string>
-{
-	const response  = await fetch("https://api.ipify.org/");
-	const ip = await response.text();
-
-	return ip;
-}
-
-function validateExists(obj: object, key: string): void
-{
-	if (!obj[key])
-		throw new Error(`Property '${key}' is a required field.`);
-}
-
-function validateType(obj: object, key: string, typeName: string): void
-{
-	if (typeof obj[key] !== typeName)
-		throw new Error(`Property '${key}' must be of type ${typeName}.`);
-}
-
-function validateArray(obj: object, key: string): void
-{
-	if (!Array.isArray(obj[key]))
-		throw new Error("Property 'dnsEntries' must be an array.");
-}
-
-function validateZoneConfig(config: any): void
-{
-	if (typeof config !== "object")
-		throw new Error("Config is not valid.");
-
-	validateExists(config, "name");
-	validateType(config, "name", "string");
-	
-	validateExists(config, "dnsEntries");
-	validateArray(config, "dnsEntries");
-}
-
-function validateConfig(config: any): void
-{
-	if (typeof config !== "object")
-		throw new Error("Config is not valid.");
-
-	validateExists(config, "apiToken");
-	validateType(config, "apiToken", "string");
-	validateExists(config, "zones");
-	validateArray(config, "zones");
-
-	let index = 0;
-
-	for (const zoneConfig of config.zones)
-	{
-		try
-		{
-			validateZoneConfig(zoneConfig);
-		}
-		catch (e: any)
-		{
-			throw new Error(`zone[${index}]: ${e.message}`);
-		}
-
-		index += 1;
-	}
-}
-
-function readConfig(path: string): Config
-{
-	try
-	{
-		const buffer = fs.readFileSync(path);
-		const text = buffer.toString();
-		const config = JSON.parse(text) as object;
-	
-		validateConfig(config);
-	
-		return config as Config;
-	}
-	catch (e: any)
-	{
-		throw new Error(`Unable to load config: ${e.message}`);
-	}
-}
-
-async function main()
+function getConfigDir(): string
 {
 	const homeDir = os.homedir();
 	const configDir = `${homeDir}/.config/cloudflare-ddns/config.json`;
-	const config = readConfig(configDir);
-	const publicIp = await getPublicIp();
-	const api = new Cloudflare(config.apiToken);
-	const zones = await api.getZones();
+
+	return configDir;
+}
+
+async function updateDnsRecords(zone: Zone, config: ZoneConfig, client: Client): Promise<boolean>
+{
+	const dnsRecords = await client.cloudflare.getDnsRecords(zone);
+	const publicIp = await client.ipify.getPublicIp();
+	let updatedRecords = 0;
+
+	for (const entry of config.dnsEntries)
+	{
+		const recordName = entry
+			? `${entry}.${zone.name}`
+			: zone.name;
+		const record = dnsRecords.find(x => x.name === recordName);
+
+		if (!record) // TODO: Create record
+			continue;
+
+		if (record.content === publicIp)
+			continue;
+
+		log(`${record.name}: Updating IP from ${record.content} to ${publicIp}.`);
+		
+		record.content = publicIp;
+
+		await client.cloudflare.updateDnsRecordIp(record);
+
+		updatedRecords += 1;
+	}
+
+	if (updatedRecords > 0)
+	{
+		log(`${zone.name}: Updated ${updatedRecords} DNS records.`);
+		
+		return true;
+	}
+
+	return false;
+}
+
+async function updateZones(config: Config): Promise<void>
+{
+	const client =
+	{
+		cloudflare: new Cloudflare(config.apiToken),
+		ipify: new Ipify()
+	};
+	const zones = await client.cloudflare.getZones();
 	let updatedZones = 0;
 
 	for (const zoneConfig of config.zones)
@@ -113,51 +77,24 @@ async function main()
 
 		if (!zone)
 		{
-			console.error(`${zoneConfig.name}: Zone does not exist under given account.`);
+			log(`${zoneConfig.name}: Zone does not exist under given account.`);
 			continue;
 		}
-
-		const dnsRecords = await api.getDnsRecords(zone);
-
-		let updatedRecords = 0;
-
-		for (const entry of zoneConfig.dnsEntries)
-		{
-			const recordName = entry
-				? `${entry}.${zone.name}`
-				: zone.name;
-			const record = dnsRecords.find(x => x.name === recordName);
-
-			if (!record)
-			{
-				// TODO: Create record
-				continue;
-			}
-
-			if (record.content === publicIp)
-				continue;
-
-			console.log(`${record.name}: Updating IP from ${record.content} to ${publicIp}.`);
-			
-			record.content = publicIp;
-
-			await api.updateDnsRecordIp(record);
-
-			updatedRecords += 1;
-		}
-
-		if (updatedRecords > 0)
-		{
-			console.log(`${zone.name}: Updated ${updatedRecords} DNS records.`);
-
+		
+		if (await updateDnsRecords(zone, zoneConfig, client))
 			updatedZones += 1;
-		}
 	}
 
 	if (updatedZones > 0)
-	{
-		console.log(`Updated ${updatedZones} zones.`);
-	}
+		log(`Updated ${updatedZones} zones.`);
+}
+
+async function main()
+{
+	const configDir = getConfigDir();
+	const config = new Config(configDir);
+
+	updateZones(config);
 }
 
 main().catch((error: any) =>
@@ -166,6 +103,6 @@ main().catch((error: any) =>
 		? error.message
 		: String(error);
 
-	console.error("Failed to update DNS records: " + message);
+	log("Failed to update DNS records: " + message);
 	process.exit(1);
 });
